@@ -2,13 +2,19 @@
 __pycache__/
 *.pyc
 .venv/
+build/
+dist/
+*.egg-info
 
 # Model & cache (besar, diunduh otomatis)
+# Catatan: src/live_stt/assets/silero_vad.onnx sengaja ikut di-commit (kecil, MIT).
 models/
-*.onnx
 
 # Hasil transkrip (isi pribadi, jangan masuk repo publik)
 transcript_*.txt
+
+# Audio uji (dibuat lokal)
+tests/audio/
 
 # macOS
 .DS_Store
