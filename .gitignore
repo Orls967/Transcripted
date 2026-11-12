@@ -1,0 +1,14 @@
+# Python / uv
+__pycache__/
+*.pyc
+.venv/
+
+# Model & cache (besar, diunduh otomatis)
+models/
+*.onnx
+
+# Hasil transkrip (isi pribadi, jangan masuk repo publik)
+transcript_*.txt
+
+# macOS
+.DS_Store
