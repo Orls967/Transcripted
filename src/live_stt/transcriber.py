@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from .audio import StreamResampler
+from .enhance import Enhancer
 from .output import TranscriptWriter, status
 from .vad import SAMPLE_RATE, Segment, Segmenter
 
@@ -33,6 +34,18 @@ MAX_CONSECUTIVE_REPEATS = 2  # teks identik ke-3 berturut-turut dibuang
 # audio asli, padahal sisa audionya terlalu singkat untuk mengucapkan teks sepanjang itu.
 PADDING_WINDOW_SEC = 1.0
 MAX_CHARS_PER_SEC = 30.0
+
+# Saat Whisper gagal memahami segmen yang sulit (jauh, tertimpa noise), ia cenderung
+# mengeluarkan ucapan basa-basi ini. Ucapan aslinya hanya ~1 dtk, jadi bila "menutupi"
+# rentang audio yang panjang, itu halusinasi.
+STOCK_PHRASES = {"terima kasih", "terima kasih banyak", "thank you", "thank you very much", "thanks"}
+STOCK_PHRASE_MAX_SEC = 3.0
+
+# Segmen "samar": suaranya nyaris setara lantai noise ruangan (suara latar dari jauh).
+# Di kondisi ini bacaan yang benar tetap berkeyakinan tinggi, sedangkan tebakan Whisper
+# berkeyakinan rendah atau berupa frasa basa-basi; keduanya dibuang.
+FAINT_SNR_DB = 12.0
+FAINT_LOGPROB_THRESHOLD = -0.6
 
 BACKLOG_WARN_SEC = 5.0
 BACKLOG_WARN_INTERVAL_SEC = 10.0
@@ -109,8 +122,10 @@ class TranscriberThread(threading.Thread):
         vad_threshold: float,
         min_silence_ms: int,
         pre_roll_ms: int,
+        enhance: bool = True,
     ) -> None:
         super().__init__(name="transcriber", daemon=True)
+        self._enhance = enhance
         self._queue = audio_queue
         self._writer = writer
         self._model = model
@@ -197,6 +212,7 @@ class TranscriberThread(threading.Thread):
         resampler = (
             StreamResampler(self._source_rate) if self._source_rate != SAMPLE_RATE else None
         )
+        enhancer = Enhancer() if self._enhance else None
         peak = 0.0
         checked_silence = not self._live
         while True:
@@ -214,18 +230,35 @@ class TranscriberThread(threading.Thread):
                         )
             if resampler is not None:
                 block = resampler.process(block)
-            self.audio_sec += len(block) / SAMPLE_RATE
-            for segment in self._segmenter.feed(block):
-                self._handle(segment)
+            self._feed(block, enhancer)
 
-        tail = [resampler.flush()] if resampler is not None else []
-        for chunk in tail:
-            self.audio_sec += len(chunk) / SAMPLE_RATE
-            for segment in self._segmenter.feed(chunk):
-                self._handle(segment)
+        if resampler is not None:
+            self._feed(resampler.flush(), enhancer)
+        final_noise_rms = enhancer.noise_rms if enhancer is not None else 0.0
+        if enhancer is not None:
+            self._feed(np.zeros(0, dtype=np.float32), enhancer, flush=True)
         for segment in self._segmenter.flush():
+            if enhancer is not None:
+                segment.noise_rms = final_noise_rms
             self._handle(segment)
         self.dropped_short = self._segmenter.dropped_short
+
+    def _feed(self, samples: np.ndarray, enhancer: Enhancer | None, flush: bool = False) -> None:
+        self.audio_sec += len(samples) / SAMPLE_RATE
+        if enhancer is None:
+            segments = self._segmenter.feed(samples)
+        else:
+            # VAD memutuskan dari sinyal yang sudah diredam noise-nya dan dikuatkan;
+            # Whisper menerima audio yang hanya di-high-pass.
+            noise_rms = enhancer.noise_rms  # sebelum flush() mengisi nol
+            processed = enhancer.flush() if flush else enhancer.process(samples)
+            segments = self._segmenter.feed(*processed)
+            if not flush:
+                noise_rms = enhancer.noise_rms
+            for segment in segments:
+                segment.noise_rms = noise_rms
+        for segment in segments:
+            self._handle(segment)
 
     def _handle(self, segment: Segment) -> None:
         started = time.perf_counter()
@@ -236,7 +269,7 @@ class TranscriberThread(threading.Thread):
         texts = [
             s["text"].strip()
             for s in result.get("segments", [])
-            if self._keep(s, segment.duration_sec)
+            if self._keep(s, segment.duration_sec, faint=segment.snr_db < FAINT_SNR_DB)
         ]
         text = " ".join(t for t in texts if t)
         if text:
@@ -245,7 +278,7 @@ class TranscriberThread(threading.Thread):
         if self._live:
             self._warn_if_backlogged()
 
-    def _keep(self, seg: dict, audio_sec: float) -> bool:
+    def _keep(self, seg: dict, audio_sec: float, faint: bool = False) -> bool:
         norm = normalize(seg.get("text", ""))
         if not norm:
             return False
@@ -259,7 +292,17 @@ class TranscriberThread(threading.Thread):
             and seg.get("avg_logprob", 0.0) < LOGPROB_THRESHOLD
         )
         looping = seg.get("compression_ratio", 0.0) > COMPRESSION_RATIO_THRESHOLD
-        if no_speech or looping or in_padding or is_known_hallucination(norm, self._prompt_norm):
+        span = min(seg.get("end", audio_sec), audio_sec) - seg.get("start", 0.0)
+        stock = norm in STOCK_PHRASES and (span >= STOCK_PHRASE_MAX_SEC or faint)
+        unreliable = faint and seg.get("avg_logprob", 0.0) < FAINT_LOGPROB_THRESHOLD
+        if (
+            no_speech
+            or looping
+            or in_padding
+            or stock
+            or unreliable
+            or is_known_hallucination(norm, self._prompt_norm)
+        ):
             self.filtered += 1
             return False
         # Teks identik yang terus berulang antar segmen adalah ciri khas halusinasi.

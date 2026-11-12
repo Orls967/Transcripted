@@ -54,6 +54,7 @@ class SileroVAD:
 class Segment:
     audio: np.ndarray  # float32, 16 kHz mono
     start_sample: int  # posisi awal segmen dihitung dari awal stream
+    noise_rms: float = 0.0  # lantai noise ruangan saat segmen dipotong (0 = tidak diketahui)
 
     @property
     def start_sec(self) -> float:
@@ -62,6 +63,18 @@ class Segment:
     @property
     def duration_sec(self) -> float:
         return len(self.audio) / SAMPLE_RATE
+
+    @property
+    def snr_db(self) -> float:
+        """Level bagian terkeras segmen (persentil 80) dibanding lantai noise ruangan."""
+        if self.noise_rms <= 0.0:
+            return float("inf")
+        n = len(self.audio) // FRAME_SAMPLES
+        if n == 0:
+            return float("inf")
+        frames = self.audio[: n * FRAME_SAMPLES].reshape(n, FRAME_SAMPLES)
+        loud = float(np.percentile(np.sqrt(np.mean(frames * frames, axis=1)), 80))
+        return 20 * float(np.log10(max(loud, 1e-9) / self.noise_rms))
 
 
 class Segmenter:
@@ -92,6 +105,7 @@ class Segmenter:
 
         self._preroll: deque[np.ndarray] = deque(maxlen=round(pre_roll_ms / FRAME_MS))
         self._pending = np.zeros(0, dtype=np.float32)  # sisa sampel yang belum genap 1 frame
+        self._pending_vad = np.zeros(0, dtype=np.float32)
         self._position = 0  # jumlah sampel yang sudah diproses sebagai frame
         self._in_speech = False
         self._frames: list[np.ndarray] = []
@@ -100,15 +114,23 @@ class Segmenter:
         self._silence_run = 0
         self.dropped_short = 0
 
-    def feed(self, samples: np.ndarray) -> list[Segment]:
-        """Masukkan audio 16 kHz mono (panjang bebas); kembalikan segmen yang selesai."""
+    def feed(self, samples: np.ndarray, vad_samples: np.ndarray | None = None) -> list[Segment]:
+        """Masukkan audio 16 kHz mono (panjang bebas); kembalikan segmen yang selesai.
+
+        `vad_samples` (opsional, sama panjang dan sejajar dengan `samples`) adalah versi
+        audio yang dipakai untuk keputusan VAD; isi segmen tetap diambil dari `samples`.
+        """
+        if vad_samples is None:
+            vad_samples = samples
         data = np.concatenate([self._pending, samples.astype(np.float32, copy=False)])
+        vad_data = np.concatenate([self._pending_vad, vad_samples.astype(np.float32, copy=False)])
         n_frames = len(data) // FRAME_SAMPLES
         segments: list[Segment] = []
         for i in range(n_frames):
-            frame = data[i * FRAME_SAMPLES : (i + 1) * FRAME_SAMPLES]
-            segments.extend(self._process_frame(frame))
+            frame = slice(i * FRAME_SAMPLES, (i + 1) * FRAME_SAMPLES)
+            segments.extend(self._process_frame(data[frame], vad_data[frame]))
         self._pending = data[n_frames * FRAME_SAMPLES :]
+        self._pending_vad = vad_data[n_frames * FRAME_SAMPLES :]
         return segments
 
     def flush(self) -> list[Segment]:
@@ -121,13 +143,14 @@ class Segmenter:
                 self._silence_run += 1
             segments.extend(self._emit(self._trailing_silence_cut()))
         self._pending = np.zeros(0, dtype=np.float32)
+        self._pending_vad = np.zeros(0, dtype=np.float32)
         self._reset_segment()
         self._preroll.clear()
         self._vad.reset()
         return segments
 
-    def _process_frame(self, frame: np.ndarray) -> list[Segment]:
-        prob = self._vad(frame)
+    def _process_frame(self, frame: np.ndarray, vad_frame: np.ndarray) -> list[Segment]:
+        prob = self._vad(vad_frame)
         self._position += FRAME_SAMPLES
 
         if not self._in_speech:

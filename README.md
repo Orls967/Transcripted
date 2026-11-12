@@ -36,6 +36,7 @@ berhenti: audio yang tersisa diproses dulu, lalu file ditutup (`Ctrl+C` kedua = 
 | `--vad-threshold` | `0.5` | Ambang probabilitas suara (0–1); naikkan bila ruangan bising |
 | `--min-silence-ms` | `600` | Durasi hening yang memotong segmen |
 | `--pre-roll-ms` | `300` | Audio sebelum suara terdeteksi yang ikut disertakan |
+| `--no-enhance` | – | Matikan pra-proses suara jauh/bising (lihat di bawah) |
 
 Contoh:
 
@@ -60,6 +61,21 @@ iTerm, VS Code, dst.), bukan ke `live-stt` sendiri.
   terminalnya.
 - Tanpa izin, macOS tidak memberi error; audio yang masuk hanya hening total. Program
   akan memperingatkan bila audio yang diterima nol semua.
+
+## Suara jauh dan ruangan bising
+
+Mic laptop menangkap banyak gemuruh frekuensi rendah (getaran meja, ketikan, kipas), dan
+VAD tidak mengenali ucapan yang levelnya dekat dengan lantai noise, padahal Whisper masih
+sanggup membacanya. Karena itu, sebelum VAD audio melewati high-pass 100 Hz, peredam noise
+spektral, dan penguatan otomatis. Whisper sendiri menerima audio yang hanya di-high-pass.
+
+- Suara latar yang terlalu samar tetap bisa memicu segmen. Hasilnya dibuang bila Whisper
+  ragu (keyakinan rendah) atau hanya mengeluarkan frasa basa-basi seperti "Terima kasih.".
+- Peredam noise efektif untuk noise yang ajek (kipas, AC, dengung). Musik atau orang lain
+  yang ikut berbicara tidak bisa dipisahkan.
+- Volume input mic di **System Settings → Sound → Input** ikut berpengaruh; naikkan bila
+  pembicara jauh.
+- `--no-enhance` mematikan pra-proses ini, mis. untuk membandingkan hasil.
 
 ## Merekam audio sistem (BlackHole)
 
