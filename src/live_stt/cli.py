@@ -27,6 +27,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     vad.add_argument("--vad-threshold", type=float, default=0.5, help="ambang probabilitas suara, 0–1 (default: %(default)s)")
     vad.add_argument("--min-silence-ms", type=int, default=600, help="durasi hening yang memotong segmen (default: %(default)s)")
     vad.add_argument("--pre-roll-ms", type=int, default=300, help="audio sebelum suara terdeteksi yang ikut disertakan (default: %(default)s)")
+    vad.add_argument("--no-enhance", action="store_true", help="matikan pra-proses suara jauh/bising (high-pass, peredam noise, penguatan otomatis)")
     args = parser.parse_args(argv)
 
     if not 0.0 < args.vad_threshold < 1.0:
@@ -136,6 +137,7 @@ def run(args: argparse.Namespace) -> int:
         vad_threshold=args.vad_threshold,
         min_silence_ms=args.min_silence_ms,
         pre_roll_ms=args.pre_roll_ms,
+        enhance=not args.no_enhance,
     )
     worker.configure_source(
         samplerate=source.samplerate,
